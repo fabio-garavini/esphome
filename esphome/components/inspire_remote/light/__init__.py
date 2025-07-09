@@ -1,7 +1,7 @@
 import esphome.codegen as cg
 from esphome.components import light
 import esphome.config_validation as cv
-from esphome.const import CONF_OUTPUT_ID
+from esphome.const import CONF_ICON, CONF_OUTPUT_ID
 
 from .. import CONF_REMOTE_ID, InspireRemote, inspire_remote_ns
 
@@ -11,6 +11,7 @@ CONFIG_SCHEMA = light.BINARY_LIGHT_SCHEMA.extend(
     {
         cv.GenerateID(CONF_OUTPUT_ID): cv.declare_id(InspireLight),
         cv.GenerateID(CONF_REMOTE_ID): cv.use_id(InspireRemote),
+        cv.Optional(CONF_ICON, default="mdi:ceiling-fan-light"): cv.icon,
     }
 )
 
