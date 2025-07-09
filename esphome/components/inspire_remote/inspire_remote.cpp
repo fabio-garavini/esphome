@@ -31,7 +31,7 @@ void InspireRemote::transmit_code(uint8_t code) {
 
   this->encode_ir_data_(data, INSPIRE_REMOTE_HEADER2 | (INSPIRE_REMOTE_FIXED << 8));
 
-  for (int i = 0; i < 5; i++) {
+  for (int i = 0; i < 8; i++) {
     data->space(INSPIRE_REMOTE_MESSAGE_SPACE);
     this->encode_ir_data_(data, code | (INSPIRE_REMOTE_FIXED << 8));
   }
