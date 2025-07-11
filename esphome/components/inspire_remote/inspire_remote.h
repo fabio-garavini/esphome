@@ -42,6 +42,7 @@ class InspireRemote : public Component,
  public:
   InspireRemote() {}
   void transmit_code(uint8_t code);
+  unsigned long get_last_received_time() const { return this->last_received_time_; }
 #ifdef USE_LIGHT
   void set_light(light::LightState *l) { this->light_ = l; }
   void toggle_light() { this->transmit_code(INSPIRE_REMOTE_LIGHT); };
@@ -58,6 +59,7 @@ class InspireRemote : public Component,
   fan::Fan *fan_{nullptr};
 #endif
   unsigned long last_sent_time_{0};
+  unsigned long last_received_time_{0};
   bool parse_code_(uint8_t code);
   bool on_receive(remote_base::RemoteReceiveData data) override;
   void encode_ir_data_(remote_base::RemoteTransmitData *data, uint16_t code);

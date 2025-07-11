@@ -20,7 +20,9 @@ void InspireLight::write_state(light::LightState *state) {
   bool new_state;
   state->current_values_as_binary(&new_state);
 
-  this->parent_->transmit_code(INSPIRE_REMOTE_LIGHT);
+  if (millis() - this->parent_->get_last_received_time() > 500) {
+    this->parent_->transmit_code(INSPIRE_REMOTE_LIGHT);
+  }
 }
 
 }  // namespace inspire_remote

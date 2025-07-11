@@ -42,6 +42,7 @@ void InspireRemote::transmit_code(uint8_t code) {
 }
 
 bool InspireRemote::parse_code_(uint8_t code) {
+  this->last_received_time_ = millis();
   switch (code) {
 #ifdef USE_LIGHT
     case INSPIRE_REMOTE_LIGHT: {
