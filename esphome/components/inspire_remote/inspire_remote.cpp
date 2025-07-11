@@ -86,21 +86,21 @@ bool InspireRemote::on_receive(remote_base::RemoteReceiveData data) {
   if (millis() - this->last_sent_time_ < 500)
     return false;  // To ignore self sent command
 
-  if (!expect_code_(data, INSPIRE_REMOTE_HEADER1 | (INSPIRE_REMOTE_FIXED << 8)))
+  /*if (!expect_code_(data, INSPIRE_REMOTE_HEADER1 | (INSPIRE_REMOTE_FIXED << 8)))
     return false;
   if (!data.expect_space(INSPIRE_REMOTE_MESSAGE_SPACE))
     return false;
   if (!expect_code_(data, INSPIRE_REMOTE_HEADER2 | (INSPIRE_REMOTE_FIXED << 8)))
-    return false;
+    return false;*/
 
   while (true) {
-    if (!data.expect_space(INSPIRE_REMOTE_MESSAGE_SPACE))
-      return false;
-
     uint8_t code = receive_code_(data);
 
     if (this->parse_code_(code))
       return true;
+
+    if (!data.expect_space(INSPIRE_REMOTE_MESSAGE_SPACE))
+      return false;
   }
 }
 
