@@ -6,6 +6,16 @@ namespace inspire_remote {
 
 static const char *const TAG = "inspire_remote";
 
+void InspireRemote::toggle_light_state() {
+  this->last_received_time_ = millis();
+  if (this->light_ != nullptr) {
+    // Get current state and toggle it
+    auto call = this->light_->make_call();
+    call.set_state(!this->light_->current_values.is_on());
+    call.perform();
+  }
+};
+
 void InspireRemote::encode_ir_data_(remote_base::RemoteTransmitData *data, uint16_t code) {
   for (int16_t i = INSPIRE_REMOTE_FRAME_SIZE - 1; i >= 0; i--) {
     if (code & ((uint16_t) 1 << i)) {
@@ -42,18 +52,11 @@ void InspireRemote::transmit_code(uint8_t code) {
 }
 
 bool InspireRemote::parse_code_(uint8_t code) {
-  this->last_received_time_ = millis();
   switch (code) {
 #ifdef USE_LIGHT
-    case INSPIRE_REMOTE_LIGHT: {
-      if (this->light_ != nullptr) {
-        // Get current state and toggle it
-        auto call = this->light_->make_call();
-        call.set_state(!this->light_->current_values.is_on());
-        call.perform();
-      }
+    case INSPIRE_REMOTE_LIGHT:
+      toggle_light_state();
       break;
-    }
 #endif
 #ifdef USE_FAN
     case INSPIRE_REMOTE_HIGH:
