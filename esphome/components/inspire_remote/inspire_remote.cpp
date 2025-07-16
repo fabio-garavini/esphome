@@ -8,10 +8,10 @@ static const char *const TAG = "inspire_remote";
 
 void InspireRemote::toggle_light_state() {
   this->last_received_time_ = millis();
-  if (this->light_ != nullptr) {
+  if (this->light != nullptr) {
     // Get current state and toggle it
-    auto call = this->light_->make_call();
-    call.set_state(!this->light_->current_values.is_on());
+    auto call = this->light->make_call();
+    call.set_state(!this->light->current_values.is_on());
     call.perform();
   }
 };

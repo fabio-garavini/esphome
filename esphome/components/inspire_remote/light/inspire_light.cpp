@@ -8,8 +8,6 @@ namespace inspire_remote {
 
 static const char *const TAG = "inspire_remote.light";
 
-void InspireLight::setup_state(light::LightState *state) { this->parent_->set_light(state); }
-
 light::LightTraits InspireLight::get_traits() {
   auto traits = light::LightTraits();
   traits.set_supported_color_modes({light::ColorMode::ON_OFF});
@@ -17,6 +15,11 @@ light::LightTraits InspireLight::get_traits() {
 }
 
 void InspireLight::write_state(light::LightState *state) {
+  if (this->parent_->light == nullptr) {
+    this->parent_->set_light(state);
+    return;
+  }
+
   bool new_state;
   state->current_values_as_binary(&new_state);
 
