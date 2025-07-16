@@ -10,7 +10,6 @@ namespace inspire_remote {
 class InspireLight : public light::LightOutput, public Component, public Parented<InspireRemote> {
  public:
   InspireLight() = default;
-  void setup_state(light::LightState *state) override;
   light::LightTraits get_traits() override;
   void write_state(light::LightState *state) override;
 };

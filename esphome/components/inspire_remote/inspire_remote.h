@@ -44,17 +44,17 @@ class InspireRemote : public Component,
   void transmit_code(uint8_t code);
   unsigned long get_last_received_time() const { return this->last_received_time_; }
 #ifdef USE_LIGHT
-  void set_light(light::LightState *l) { this->light_ = l; }
+  void set_light(light::LightState *l) { this->light = l; }
   void toggle_light_state();
 #endif
 #ifdef USE_FAN
   void set_fan(fan::Fan *f) { this->fan_ = f; }
 #endif
 
- protected:
 #ifdef USE_LIGHT
-  light::LightState *light_{nullptr};
+  light::LightState *light{nullptr};
 #endif
+ protected:
 #ifdef USE_FAN
   fan::Fan *fan_{nullptr};
 #endif
