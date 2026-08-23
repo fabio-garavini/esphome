@@ -233,8 +233,9 @@ bool DaikinWrcClimate::on_receive(remote_base::RemoteReceiveData data) {
   if (millis() - this->last_sent_time_ < 500)
     return false;  // To ignore self sent command
   uint8_t state_frame[DAIKIN_WRC_STATE_FRAME_SIZE] = {};
-  if (!data.expect_item(DAIKIN_WRC_HEADER_MARK, DAIKIN_WRC_HEADER_SPACE) ||
+  if ((!data.expect_item(DAIKIN_WRC_HEADER_MARK, DAIKIN_WRC_HEADER_SPACE) ||
       !data.expect_item(DAIKIN_WRC_HEADER_MARK, DAIKIN_WRC_HEADER_SPACE) ||
+      !data.expect_item(DAIKIN_WRC_HDR_MSG_MARK, DAIKIN_WRC_HDR_MSG_SPACE)) &&
       !data.expect_item(DAIKIN_WRC_HDR_MSG_MARK, DAIKIN_WRC_HDR_MSG_SPACE)) {
     return false;
   }
