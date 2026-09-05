@@ -1,8 +1,11 @@
 #include "daikin_wrc.h"
-#include "esphome/components/remote_base/remote_base.h"
 
-namespace esphome {
-namespace daikin_wrc {
+#include <cmath>
+
+#include "esphome/components/remote_base/remote_base.h"
+#include "esphome/core/log.h"
+
+namespace esphome::daikin_wrc {
 
 static const char *const TAG = "daikin_wrc.climate";
 
@@ -28,7 +31,22 @@ void DaikinWrcClimate::control(const climate::ClimateCall &call) {
 
 void DaikinWrcClimate::transmit_state() {
   this->last_sent_time_ = millis();
-  uint8_t remote_state[16] = {0x6, 0x1, 0x2, 0x1, 0x0, 0x0, 0x0, 0x0, 0x2, 0x6, 0x2, 0x4, 0x2, 0x2, 0xc, 0x0};
+  uint8_t remote_state[16] = {DAIKIN_WRC_FRAME_HEADER_1,
+                              DAIKIN_WRC_FRAME_HEADER_2,
+                              0x2,
+                              0x1,
+                              0x0,
+                              0x0,
+                              0x0,
+                              0x0,
+                              0x2,
+                              0x6,
+                              0x2,
+                              0x4,
+                              0x2,
+                              0x2,
+                              0xc,
+                              0x0};
 
   remote_state[2] = this->operation_mode_();
   remote_state[3] = this->fan_speed_();
@@ -37,9 +55,11 @@ void DaikinWrcClimate::transmit_state() {
   remote_state[13] = temperature >> 4;
   remote_state[14] = this->special_flags_();
 
-  for (int i = 0; i < 15; i++) {
-    remote_state[15] += remote_state[i];
+  uint8_t checksum = 0;
+  for (uint8_t i = 0; i < DAIKIN_WRC_STATE_FRAME_SIZE - 1; i++) {
+    checksum += remote_state[i];
   }
+  remote_state[15] = checksum & 0x0f;
 
   auto transmit = this->transmitter_->transmit();
   auto *data = transmit.get_data();
@@ -51,7 +71,7 @@ void DaikinWrcClimate::transmit_state() {
   data->space(DAIKIN_WRC_HEADER_SPACE);
   data->mark(DAIKIN_WRC_HDR_MSG_MARK);
   data->space(DAIKIN_WRC_HDR_MSG_SPACE);
-  for (unsigned char i : remote_state) {
+  for (uint8_t i : remote_state) {
     for (uint8_t mask = 1; mask <= 8; mask <<= 1) {  // iterate through bit mask
       data->mark(DAIKIN_WRC_BIT_MARK);
       bool bit = i & mask;
@@ -98,7 +118,7 @@ uint8_t DaikinWrcClimate::operation_mode_() const {
 
 uint8_t DaikinWrcClimate::fan_speed_() const {
   uint8_t fan_speed = DAIKIN_WRC_FAN_AUTO;
-  switch (this->fan_mode.value()) {
+  switch (this->fan_mode.value_or(climate::CLIMATE_FAN_AUTO)) {
     case climate::CLIMATE_FAN_QUIET:
       fan_speed = DAIKIN_WRC_FAN_SILENT;
       break;
@@ -145,23 +165,28 @@ uint8_t DaikinWrcClimate::special_flags_() const {
 
 uint8_t DaikinWrcClimate::temperature_() const {
   uint8_t temperature =
-      (uint8_t) roundf(clamp<float>(this->target_temperature, DAIKIN_WRC_TEMP_MIN, DAIKIN_WRC_TEMP_MAX));
+      static_cast<uint8_t>(roundf(clamp<float>(this->target_temperature, DAIKIN_WRC_TEMP_MIN, DAIKIN_WRC_TEMP_MAX)));
   return ((temperature / 10) << 4) | (temperature % 10);
 }
 
 bool DaikinWrcClimate::parse_state_frame_(const uint8_t frame[]) {
+  ESP_LOGVV(TAG,
+            "Received state frame: %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x",
+            frame[0], frame[1], frame[2], frame[3], frame[4], frame[5], frame[6], frame[7], frame[8], frame[9],
+            frame[10], frame[11], frame[12], frame[13], frame[14], frame[15]);
   uint8_t checksum = 0;
-  for (int i = 0; i < (DAIKIN_WRC_STATE_FRAME_SIZE - 1); i++) {
+  for (uint8_t i = 0; i < (DAIKIN_WRC_STATE_FRAME_SIZE - 1); i++) {
     checksum += frame[i];
   }
   checksum &= 0x0f;
   if (frame[DAIKIN_WRC_STATE_FRAME_SIZE - 1] != checksum) {
-    ESP_LOGE(TAG, "Checksum doesn't match");
+    ESP_LOGV(TAG, "Checksum doesn't match: expected 0x%02x, got 0x%02x", checksum,
+             frame[DAIKIN_WRC_STATE_FRAME_SIZE - 1]);
     return false;
   }
   uint8_t mode = frame[2];
   bool power = frame[14] & 0x8;
-  uint8_t temperature = (frame[13] * 10) + frame[12];
+  uint8_t temperature = clamp<uint8_t>((frame[13] * 10) + frame[12], DAIKIN_WRC_TEMP_MIN, DAIKIN_WRC_TEMP_MAX);
   if (((this->mode == climate::CLIMATE_MODE_OFF && power) || (this->mode != climate::CLIMATE_MODE_OFF && !power))) {
     switch (mode) {
       case DAIKIN_WRC_MODE_COOL:
@@ -230,15 +255,26 @@ bool DaikinWrcClimate::parse_state_frame_(const uint8_t frame[]) {
 }
 
 bool DaikinWrcClimate::on_receive(remote_base::RemoteReceiveData data) {
-  if (millis() - this->last_sent_time_ < 500)
+  if (this->last_sent_time_ != 0 && millis() - this->last_sent_time_ < DAIKIN_WRC_SELF_ECHO_GUARD)
     return false;  // To ignore self sent command
-  uint8_t state_frame[DAIKIN_WRC_STATE_FRAME_SIZE] = {};
-  if ((!data.expect_item(DAIKIN_WRC_HEADER_MARK, DAIKIN_WRC_HEADER_SPACE) ||
-      !data.expect_item(DAIKIN_WRC_HEADER_MARK, DAIKIN_WRC_HEADER_SPACE) ||
-      !data.expect_item(DAIKIN_WRC_HDR_MSG_MARK, DAIKIN_WRC_HDR_MSG_SPACE)) &&
-      !data.expect_item(DAIKIN_WRC_HDR_MSG_MARK, DAIKIN_WRC_HDR_MSG_SPACE)) {
-    return false;
+
+  // The IR receiver module may distort the first symbols of a burst after being idle,
+  // and some third party remotes send the message header without the two preamble
+  // headers. Scan for the message header anywhere in the burst and retry at every
+  // occurrence, so a single distorted symbol doesn't drop the whole command.
+  for (uint32_t offset = 0; offset + 2 < data.size(); offset++) {
+    if (!data.peek_item(DAIKIN_WRC_HDR_MSG_MARK, DAIKIN_WRC_HDR_MSG_SPACE, offset))
+      continue;
+    data.reset();
+    data.advance(offset + 2);  // skip the message header item
+    uint8_t state_frame[DAIKIN_WRC_STATE_FRAME_SIZE] = {};
+    if (this->read_state_frame_(data, state_frame) && this->parse_state_frame_(state_frame))
+      return true;
   }
+  return false;
+}
+
+bool DaikinWrcClimate::read_state_frame_(remote_base::RemoteReceiveData &data, uint8_t frame[]) {
   for (uint8_t pos = 0; pos < DAIKIN_WRC_STATE_FRAME_SIZE; pos++) {
     uint8_t byte = 0;
     for (int8_t bit = 0; bit < 4; bit++) {
@@ -248,19 +284,13 @@ bool DaikinWrcClimate::on_receive(remote_base::RemoteReceiveData data) {
         return false;
       }
     }
-    state_frame[pos] = byte;
-    if (pos == 0) {
-      // frame header
-      if (byte != 0x6)
-        return false;
-    } else if (pos == 1) {
-      // frame header
-      if (byte != 0x1)
-        return false;
-    }
+    frame[pos] = byte;
+    if (pos == 0 && byte != DAIKIN_WRC_FRAME_HEADER_1)
+      return false;
+    if (pos == 1 && byte != DAIKIN_WRC_FRAME_HEADER_2)
+      return false;
   }
-  return this->parse_state_frame_(state_frame);
+  return true;
 }
 
-}  // namespace daikin_wrc
-}  // namespace esphome
+}  // namespace esphome::daikin_wrc
