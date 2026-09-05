@@ -1,18 +1,17 @@
 #pragma once
 
 #include "../inspire_remote.h"
-#include "esphome/core/component.h"
 #include "esphome/components/light/light_output.h"
 
-namespace esphome {
-namespace inspire_remote {
+namespace esphome::inspire_remote {
 
-class InspireLight : public light::LightOutput, public Component, public Parented<InspireRemote> {
+class InspireLight : public light::LightOutput, public Parented<InspireRemote> {
  public:
-  InspireLight() = default;
   light::LightTraits get_traits() override;
   void write_state(light::LightState *state) override;
+
+ protected:
+  bool initial_state_written_{false};
 };
 
-}  // namespace inspire_remote
-}  // namespace esphome
+}  // namespace esphome::inspire_remote

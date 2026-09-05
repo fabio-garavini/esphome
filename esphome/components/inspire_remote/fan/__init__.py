@@ -14,7 +14,7 @@ CONFIG_SCHEMA = (
     .extend(
         {
             cv.GenerateID(CONF_REMOTE_ID): cv.use_id(InspireRemote),
-            cv.Optional(CONF_SPEED_COUNT, default=3): cv.int_range(min=1),
+            cv.Optional(CONF_SPEED_COUNT, default=3): cv.int_range(min=1, max=3),
         }
     )
     .extend(cv.COMPONENT_SCHEMA)

@@ -1,27 +1,30 @@
 #include "inspire_fan.h"
 
-namespace esphome {
-namespace inspire_remote {
+#include "esphome/core/log.h"
+
+namespace esphome::inspire_remote {
 
 static const char *const TAG = "inspire_remote.fan";
 
 void InspireFan::setup() {
+  // Construct the traits before restoring the state so validation sees the correct traits
+  this->traits_ = fan::FanTraits(false, this->speed_count_ > 0, false, this->speed_count_);
+
   auto restore = this->restore_state_();
   if (restore.has_value()) {
     restore->apply(*this);
   }
-
-  // Construct traits
-  this->traits_ =
-      fan::FanTraits(this->has_oscillating_, this->speed_count_ > 0, this->has_direction_, this->speed_count_);
 }
 
-void InspireFan::dump_config() { LOG_FAN("", "Inspire Fan", this); }
+void InspireFan::dump_config() {
+  LOG_FAN("", "Inspire Fan", this);
+  ESP_LOGCONFIG(TAG, "  Speed count: %d", this->speed_count_);
+}
 
 void InspireFan::control(const fan::FanCall &call) {
   if (call.get_state().has_value())
     this->state = *call.get_state();
-  if (call.get_speed().has_value() && (this->speed_count_ > 0))
+  if (call.get_speed().has_value() && this->speed_count_ > 0)
     this->speed = *call.get_speed();
 
   this->transmit_state();
@@ -33,9 +36,6 @@ void InspireFan::transmit_state() {
 
   if (this->state) {
     switch (this->speed) {
-      case 0:
-        message = INSPIRE_REMOTE_OFF;
-        break;
       case 1:
         message = INSPIRE_REMOTE_LOW;
         break;
@@ -45,8 +45,9 @@ void InspireFan::transmit_state() {
       case 3:
         message = INSPIRE_REMOTE_HIGH;
         break;
+      case 0:
       default:
-        message = INSPIRE_REMOTE_MEDIUM;
+        message = INSPIRE_REMOTE_OFF;
         break;
     }
   } else {
@@ -56,5 +57,4 @@ void InspireFan::transmit_state() {
   this->parent_->transmit_code(message);
 }
 
-}  // namespace inspire_remote
-}  // namespace esphome
+}  // namespace esphome::inspire_remote

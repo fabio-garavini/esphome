@@ -1,0 +1,15 @@
+inspire_remote:
+  - id: inspire
+    transmitter_id: xmitr
+    receiver_id: rcvr
+
+fan:
+  - platform: inspire_remote
+    remote_id: inspire
+    name: Inspire Fan
+    speed_count: 3
+
+light:
+  - platform: inspire_remote
+    remote_id: inspire
+    name: Inspire Light

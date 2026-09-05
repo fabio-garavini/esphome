@@ -1,24 +1,25 @@
 #include "inspire_remote.h"
-#include "esphome/components/remote_base/remote_base.h"
 
-namespace esphome {
-namespace inspire_remote {
+#include "esphome/core/log.h"
+
+namespace esphome::inspire_remote {
 
 static const char *const TAG = "inspire_remote";
 
+void InspireRemote::dump_config() { ESP_LOGCONFIG(TAG, "Inspire Remote:"); }
+
 void InspireRemote::toggle_light_state() {
   this->last_received_time_ = millis();
-  if (this->light != nullptr) {
-    // Get current state and toggle it
-    auto call = this->light->make_call();
-    call.set_state(!this->light->current_values.is_on());
-    call.perform();
-  }
-};
+  if (this->light_ == nullptr)
+    return;
+  auto call = this->light_->make_call();
+  call.set_state(!this->light_->current_values.is_on());
+  call.perform();
+}
 
 void InspireRemote::encode_ir_data_(remote_base::RemoteTransmitData *data, uint16_t code) {
   for (int16_t i = INSPIRE_REMOTE_FRAME_SIZE - 1; i >= 0; i--) {
-    if (code & ((uint16_t) 1 << i)) {
+    if (code & (1 << i)) {
       data->mark(INSPIRE_REMOTE_ONE_MARK);
       data->space(INSPIRE_REMOTE_ONE_SPACE);
     } else {
@@ -36,12 +37,12 @@ void InspireRemote::transmit_code(uint8_t code) {
   data->set_carrier_frequency(INSPIRE_REMOTE_IR_FREQUENCY);
 
   this->encode_ir_data_(data, INSPIRE_REMOTE_HEADER1 | (INSPIRE_REMOTE_FIXED << 8));
-
   data->space(INSPIRE_REMOTE_MESSAGE_SPACE);
-
   this->encode_ir_data_(data, INSPIRE_REMOTE_HEADER2 | (INSPIRE_REMOTE_FIXED << 8));
 
-  for (int i = 0; i < 8; i++) {
+  // The device only accepts a command after it has been repeated this many times,
+  // making a full transmission take roughly 300 ms.
+  for (int i = 0; i < INSPIRE_REMOTE_REPEATS; i++) {
     data->space(INSPIRE_REMOTE_MESSAGE_SPACE);
     this->encode_ir_data_(data, code | (INSPIRE_REMOTE_FIXED << 8));
   }
@@ -51,60 +52,67 @@ void InspireRemote::transmit_code(uint8_t code) {
   transmit.perform();
 }
 
+bool InspireRemote::on_receive(remote_base::RemoteReceiveData data) {
+  if (millis() - this->last_sent_time_ < INSPIRE_REMOTE_SELF_ECHO_DELAY)
+    return false;
+
+  // Frame layout: header1, message space, header2, [message space, code] x repeats
+  if (!this->expect_code_(data, INSPIRE_REMOTE_HEADER1 | (INSPIRE_REMOTE_FIXED << 8)))
+    return false;
+  if (!data.expect_space(INSPIRE_REMOTE_MESSAGE_SPACE))
+    return false;
+  if (!this->expect_code_(data, INSPIRE_REMOTE_HEADER2 | (INSPIRE_REMOTE_FIXED << 8)))
+    return false;
+  if (!data.expect_space(INSPIRE_REMOTE_MESSAGE_SPACE))
+    return false;
+
+  uint8_t code;
+  if (!this->receive_code_(data, code))
+    return false;
+
+  return this->parse_code_(code);
+}
+
 bool InspireRemote::parse_code_(uint8_t code) {
+#ifdef USE_FAN
+  if (this->fan_ == nullptr && (code == INSPIRE_REMOTE_HIGH || code == INSPIRE_REMOTE_MEDIUM ||
+                                code == INSPIRE_REMOTE_LOW || code == INSPIRE_REMOTE_OFF)) {
+    ESP_LOGW(TAG, "Received fan code 0x%02X but no fan is configured", code);
+    return true;
+  }
+#endif
   switch (code) {
 #ifdef USE_LIGHT
     case INSPIRE_REMOTE_LIGHT:
-      toggle_light_state();
+      this->toggle_light_state();
       break;
 #endif
 #ifdef USE_FAN
     case INSPIRE_REMOTE_HIGH:
-      fan_->speed = 3;
-      fan_->state = true;
-      fan_->publish_state();
+      this->fan_->speed = 3;
+      this->fan_->state = true;
+      this->fan_->publish_state();
       break;
     case INSPIRE_REMOTE_MEDIUM:
-      fan_->speed = 2;
-      fan_->state = true;
-      fan_->publish_state();
+      this->fan_->speed = 2;
+      this->fan_->state = true;
+      this->fan_->publish_state();
       break;
     case INSPIRE_REMOTE_LOW:
-      fan_->speed = 1;
-      fan_->state = true;
-      fan_->publish_state();
+      this->fan_->speed = 1;
+      this->fan_->state = true;
+      this->fan_->publish_state();
       break;
     case INSPIRE_REMOTE_OFF:
-      fan_->state = false;
-      fan_->publish_state();
+      this->fan_->state = false;
+      this->fan_->publish_state();
       break;
 #endif
     default:
+      ESP_LOGD(TAG, "Received unknown code 0x%02X", code);
       return false;
   }
   return true;
-}
-
-bool InspireRemote::on_receive(remote_base::RemoteReceiveData data) {
-  if (millis() - this->last_sent_time_ < 500)
-    return false;  // To ignore self sent command
-
-  /*if (!expect_code_(data, INSPIRE_REMOTE_HEADER1 | (INSPIRE_REMOTE_FIXED << 8)))
-    return false;
-  if (!data.expect_space(INSPIRE_REMOTE_MESSAGE_SPACE))
-    return false;
-  if (!expect_code_(data, INSPIRE_REMOTE_HEADER2 | (INSPIRE_REMOTE_FIXED << 8)))
-    return false;*/
-
-  while (true) {
-    uint8_t code = receive_code_(data);
-
-    if (this->parse_code_(code))
-      return true;
-
-    if (!data.expect_space(INSPIRE_REMOTE_MESSAGE_SPACE))
-      return false;
-  }
 }
 
 bool InspireRemote::expect_code_(remote_base::RemoteReceiveData &data, uint16_t expected_code) {
@@ -122,25 +130,31 @@ bool InspireRemote::expect_code_(remote_base::RemoteReceiveData &data, uint16_t 
   return true;
 }
 
-uint8_t InspireRemote::receive_code_(remote_base::RemoteReceiveData &data) {
-  uint8_t code = 0;
+bool InspireRemote::receive_code_(remote_base::RemoteReceiveData &data, uint8_t &code) {
+  uint16_t frame = 0;
 
   for (int bit = INSPIRE_REMOTE_FRAME_SIZE - 1; bit >= 0; bit--) {
     if (bit != 0) {
       if (data.expect_item(INSPIRE_REMOTE_ONE_MARK, INSPIRE_REMOTE_ONE_SPACE)) {
-        code |= (1 << bit);
+        frame |= 1 << bit;
       } else if (!data.expect_item(INSPIRE_REMOTE_ZERO_MARK, INSPIRE_REMOTE_ZERO_SPACE)) {
+        return false;
       }
     } else {
       if (data.expect_mark(INSPIRE_REMOTE_ONE_MARK)) {
-        code |= (1 << bit);
-      } else if (data.expect_mark(INSPIRE_REMOTE_ZERO_MARK)) {
+        frame |= 1 << bit;
+      } else if (!data.expect_mark(INSPIRE_REMOTE_ZERO_MARK)) {
+        return false;
       }
     }
   }
 
-  return code;
+  // Validate the fixed prefix to reject noise that happens to match a command byte
+  if ((frame >> 8) != INSPIRE_REMOTE_FIXED)
+    return false;
+
+  code = frame & 0xFF;
+  return true;
 }
 
-}  // namespace inspire_remote
-}  // namespace esphome
+}  // namespace esphome::inspire_remote
