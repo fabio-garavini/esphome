@@ -1,6 +1,7 @@
 substitutions:
-  ir_transmitter_pin: GPIO2
-  ir_receiver_pin: GPIO4
-  state_sensor_pin: GPIO15
+  ac_state_pin: GPIO4
 
-<<: !include common.yaml
+packages:
+  remote_transmitter: !include ../../test_build_components/common/remote_transmitter/esp32-idf.yaml
+  remote_receiver: !include ../../test_build_components/common/remote_receiver/esp32-idf.yaml
+  daikin_wrc: !include common.yaml

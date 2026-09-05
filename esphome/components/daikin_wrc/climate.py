@@ -1,6 +1,7 @@
 import esphome.codegen as cg
 from esphome.components import binary_sensor, climate_ir
 import esphome.config_validation as cv
+from esphome.types import ConfigType
 
 CONF_STATE_SENSOR_ID = "state_sensor_id"
 
@@ -16,9 +17,9 @@ CONFIG_SCHEMA = climate_ir.climate_ir_with_receiver_schema(DaikinWrcClimate).ext
 )
 
 
-async def to_code(config):
+async def to_code(config: ConfigType) -> None:
     var = await climate_ir.new_climate_ir(config)
 
-    if CONF_STATE_SENSOR_ID in config:
-        bs = await cg.get_variable(config[CONF_STATE_SENSOR_ID])
+    if (state_sensor_id := config.get(CONF_STATE_SENSOR_ID)) is not None:
+        bs = await cg.get_variable(state_sensor_id)
         cg.add(var.set_state_sensor(bs))
