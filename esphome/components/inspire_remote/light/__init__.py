@@ -5,7 +5,9 @@ from esphome.const import CONF_ICON, CONF_OUTPUT_ID
 
 from .. import CONF_REMOTE_ID, InspireRemote, inspire_remote_ns
 
-InspireLight = inspire_remote_ns.class_("InspireLight", light.LightOutput, cg.Component)
+InspireLight = inspire_remote_ns.class_(
+    "InspireLight", light.LightOutput, cg.Parented.template(InspireRemote)
+)
 
 CONFIG_SCHEMA = light.BINARY_LIGHT_SCHEMA.extend(
     {
@@ -18,7 +20,6 @@ CONFIG_SCHEMA = light.BINARY_LIGHT_SCHEMA.extend(
 
 async def to_code(config):
     var = cg.new_Pvariable(config[CONF_OUTPUT_ID])
-    await cg.register_component(var, config)
     await light.register_light(var, config)
 
     await cg.register_parented(var, config[CONF_REMOTE_ID])
