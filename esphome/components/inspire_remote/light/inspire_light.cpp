@@ -8,21 +8,24 @@ light::LightTraits InspireLight::get_traits() {
   return traits;
 }
 
-void InspireLight::write_state(light::LightState *state) {
-  // The LightState is not known at compile time, so capture it on the first call. The first
-  // call happens at boot when the restored state is applied; skip transmitting then, otherwise
-  // the restore state would toggle the physical light.
-  if (!this->initial_state_written_) {
-    this->initial_state_written_ = true;
-    this->parent_->set_light(state);
-    return;
-  }
+void InspireLight::setup_state(light::LightState *state) { this->parent_->set_light(state); }
 
-  // Skip transmitting when the state change originated from an IR command, otherwise the
-  // light would toggle a second time
-  if (millis() - this->parent_->get_last_received_time() > INSPIRE_REMOTE_IR_STATE_DELAY) {
-    this->parent_->transmit_code(INSPIRE_REMOTE_LIGHT);
-  }
+void InspireLight::update_state(light::LightState *state) {
+  // Only the first update is the restored state. If an on_boot command follows it before the first
+  // write, write_state() compares that newer request with the restored state and transmits if needed.
+  if (this->initial_update_seen_)
+    return;
+  this->initial_update_seen_ = true;
+
+  bool state_value;
+  state->current_values_as_binary(&state_value);
+  this->parent_->set_restored_light_state(state_value);
+}
+
+void InspireLight::write_state(light::LightState *state) {
+  bool state_value;
+  state->current_values_as_binary(&state_value);
+  this->parent_->write_light_state(state_value);
 }
 
 }  // namespace esphome::inspire_remote

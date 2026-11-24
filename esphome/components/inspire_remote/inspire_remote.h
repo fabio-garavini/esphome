@@ -11,7 +11,7 @@
 
 namespace esphome::inspire_remote {
 
-// Command codes (transmitted as 12-bit frames with the fixed 0xC prefix in the upper nibble)
+// Commands are sent as 12-bit frames with this fixed value in the upper nibble.
 inline constexpr uint8_t INSPIRE_REMOTE_FIXED = 0xC;
 inline constexpr uint8_t INSPIRE_REMOTE_HEADER1 = 0x00;
 inline constexpr uint8_t INSPIRE_REMOTE_HEADER2 = 0x7F;
@@ -24,7 +24,7 @@ inline constexpr uint8_t INSPIRE_REMOTE_2H = 0x20;
 inline constexpr uint8_t INSPIRE_REMOTE_4H = 0x46;
 inline constexpr uint8_t INSPIRE_REMOTE_8H = 0x02;
 
-// IR timings in microseconds
+// IR timings in microseconds.
 inline constexpr uint32_t INSPIRE_REMOTE_ONE_MARK = 1340;
 inline constexpr uint32_t INSPIRE_REMOTE_ZERO_MARK = 460;
 inline constexpr uint32_t INSPIRE_REMOTE_ONE_SPACE = 400;
@@ -33,45 +33,43 @@ inline constexpr uint32_t INSPIRE_REMOTE_MESSAGE_SPACE = 7000;
 inline constexpr uint32_t INSPIRE_REMOTE_END_SPACE = 100000;
 
 inline constexpr uint32_t INSPIRE_REMOTE_IR_FREQUENCY = 38000;
-inline constexpr uint32_t INSPIRE_REMOTE_FRAME_SIZE = 12;
-// The device only accepts a command after it has been repeated this many times
+inline constexpr uint8_t INSPIRE_REMOTE_FRAME_SIZE = 12;
+// The receiver only accepts a command after it has been repeated this many times.
 inline constexpr uint8_t INSPIRE_REMOTE_REPEATS = 8;
-// Ignore commands received within this window after transmitting, to avoid acting on our own
-// echo (ms)
+// Ignore our own transmission if the IR receiver reports it back.
 inline constexpr uint32_t INSPIRE_REMOTE_SELF_ECHO_DELAY = 500;
-// Skip transmitting after receiving a light command, since the state change already
-// originated from IR (ms)
-inline constexpr uint32_t INSPIRE_REMOTE_IR_STATE_DELAY = 500;
 
-class InspireRemote : public Component,
-                      public remote_base::RemoteReceiverListener,
-                      public remote_base::RemoteTransmittable {
+class InspireRemote final : public Component,
+                            public remote_base::RemoteReceiverListener,
+                            public remote_base::RemoteTransmittable {
  public:
-  void transmit_code(uint8_t code);
   void dump_config() override;
-  uint32_t get_last_received_time() const { return this->last_received_time_; }
+  void transmit_code(uint8_t code);
+
 #ifdef USE_LIGHT
   void set_light(light::LightState *light) { this->light_ = light; }
-  void toggle_light_state();
+  void set_restored_light_state(bool state);
+  void write_light_state(bool state);
 #endif
 #ifdef USE_FAN
   void set_fan(fan::Fan *fan) { this->fan_ = fan; }
 #endif
 
  protected:
+  bool on_receive(remote_base::RemoteReceiveData data) override;
+  bool parse_code_(uint8_t code);
 #ifdef USE_LIGHT
+  void toggle_light_state_();
   light::LightState *light_{nullptr};
+  bool assumed_light_state_{false};
+  bool light_state_known_{false};
 #endif
 #ifdef USE_FAN
+  void update_fan_(bool state, uint8_t speed = 0);
   fan::Fan *fan_{nullptr};
 #endif
   uint32_t last_sent_time_{0};
-  uint32_t last_received_time_{0};
-  bool parse_code_(uint8_t code);
-  bool on_receive(remote_base::RemoteReceiveData data) override;
-  void encode_ir_data_(remote_base::RemoteTransmitData *data, uint16_t code);
-  bool expect_code_(remote_base::RemoteReceiveData &data, uint16_t expected_code);
-  bool receive_code_(remote_base::RemoteReceiveData &data, uint8_t &code);
+  bool has_transmitted_{false};
 };
 
 }  // namespace esphome::inspire_remote

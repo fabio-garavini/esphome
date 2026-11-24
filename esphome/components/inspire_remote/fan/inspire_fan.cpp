@@ -4,57 +4,48 @@
 
 namespace esphome::inspire_remote {
 
-static const char *const TAG = "inspire_remote.fan";
+ESPHOME_LOG_TAG(TAG, "inspire_remote.fan");
 
 void InspireFan::setup() {
-  // Construct the traits before restoring the state so validation sees the correct traits
-  this->traits_ = fan::FanTraits(false, this->speed_count_ > 0, false, this->speed_count_);
-
   auto restore = this->restore_state_();
-  if (restore.has_value()) {
-    restore->apply(*this);
-  }
+  if (!restore.has_value())
+    return;
+
+  // Fan commands are absolute, so replaying restore is safe and applies ALWAYS_ON/OFF to the device.
+  // Restore data is not validated by FanRestoreState::apply(); normalize a missing or stale speed.
+  this->state = restore->state;
+  this->speed = restore->speed == 0 ? this->speed_count_ : restore->speed;
+  this->speed = clamp(this->speed, 1, static_cast<int>(this->speed_count_));
+  this->transmit_state_();
+  this->publish_state();
 }
 
-void InspireFan::dump_config() {
-  LOG_FAN("", "Inspire Fan", this);
-  ESP_LOGCONFIG(TAG, "  Speed count: %d", this->speed_count_);
-}
+void InspireFan::dump_config() { LOG_FAN("", "Inspire Fan", this); }
 
 void InspireFan::control(const fan::FanCall &call) {
   if (call.get_state().has_value())
     this->state = *call.get_state();
-  if (call.get_speed().has_value() && this->speed_count_ > 0)
+  if (call.get_speed().has_value())
     this->speed = *call.get_speed();
+  if (this->state)
+    this->speed = clamp(this->speed, 1, static_cast<int>(this->speed_count_));
 
-  this->transmit_state();
+  this->transmit_state_();
   this->publish_state();
 }
 
-void InspireFan::transmit_state() {
-  uint8_t message;
-
-  if (this->state) {
-    switch (this->speed) {
-      case 1:
-        message = INSPIRE_REMOTE_LOW;
-        break;
-      case 2:
-        message = INSPIRE_REMOTE_MEDIUM;
-        break;
-      case 3:
-        message = INSPIRE_REMOTE_HIGH;
-        break;
-      case 0:
-      default:
-        message = INSPIRE_REMOTE_OFF;
-        break;
-    }
+void InspireFan::transmit_state_() {
+  uint8_t code;
+  if (!this->state) {
+    code = INSPIRE_REMOTE_OFF;
+  } else if (this->speed >= 3) {
+    code = INSPIRE_REMOTE_HIGH;
+  } else if (this->speed == 2) {
+    code = INSPIRE_REMOTE_MEDIUM;
   } else {
-    message = INSPIRE_REMOTE_OFF;
+    code = INSPIRE_REMOTE_LOW;
   }
-
-  this->parent_->transmit_code(message);
+  this->parent_->transmit_code(code);
 }
 
 }  // namespace esphome::inspire_remote

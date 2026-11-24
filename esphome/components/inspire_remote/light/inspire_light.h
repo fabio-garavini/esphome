@@ -5,13 +5,15 @@
 
 namespace esphome::inspire_remote {
 
-class InspireLight : public light::LightOutput, public Parented<InspireRemote> {
+class InspireLight final : public light::LightOutput, public Parented<InspireRemote> {
  public:
   light::LightTraits get_traits() override;
+  void setup_state(light::LightState *state) override;
+  void update_state(light::LightState *state) override;
   void write_state(light::LightState *state) override;
 
  protected:
-  bool initial_state_written_{false};
+  bool initial_update_seen_{false};
 };
 
 }  // namespace esphome::inspire_remote

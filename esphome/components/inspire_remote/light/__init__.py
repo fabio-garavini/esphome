@@ -1,9 +1,14 @@
 import esphome.codegen as cg
 from esphome.components import light
+from esphome.components.const import CONF_REMOTE_ID
 import esphome.config_validation as cv
 from esphome.const import CONF_ICON, CONF_OUTPUT_ID
+import esphome.final_validate as fv
+from esphome.types import ConfigType
 
-from .. import CONF_REMOTE_ID, InspireRemote, inspire_remote_ns
+from .. import DOMAIN, InspireRemote, inspire_remote_ns
+
+DEPENDENCIES = [DOMAIN]
 
 InspireLight = inspire_remote_ns.class_(
     "InspireLight", light.LightOutput, cg.Parented.template(InspireRemote)
@@ -17,9 +22,15 @@ CONFIG_SCHEMA = light.BINARY_LIGHT_SCHEMA.extend(
     }
 )
 
+FINAL_VALIDATE_SCHEMA = fv.unique_platform_key(
+    domain="light",
+    platform=DOMAIN,
+    keys=(CONF_REMOTE_ID,),
+    message="Only one inspire_remote light entry is allowed per remote",
+)
 
-async def to_code(config):
+
+async def to_code(config: ConfigType) -> None:
     var = cg.new_Pvariable(config[CONF_OUTPUT_ID])
     await light.register_light(var, config)
-
     await cg.register_parented(var, config[CONF_REMOTE_ID])
