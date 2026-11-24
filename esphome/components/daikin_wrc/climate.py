@@ -20,6 +20,4 @@ CONFIG_SCHEMA = climate_ir.climate_ir_with_receiver_schema(DaikinWrcClimate).ext
 async def to_code(config: ConfigType) -> None:
     var = await climate_ir.new_climate_ir(config)
 
-    if (state_sensor_id := config.get(CONF_STATE_SENSOR_ID)) is not None:
-        bs = await cg.get_variable(state_sensor_id)
-        cg.add(var.set_state_sensor(bs))
+    await cg.add_variable(var.set_state_sensor, config.get(CONF_STATE_SENSOR_ID))

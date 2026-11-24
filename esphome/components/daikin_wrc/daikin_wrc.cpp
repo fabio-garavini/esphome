@@ -3,170 +3,227 @@
 #include <cmath>
 
 #include "esphome/components/remote_base/remote_base.h"
+#include "esphome/core/hal.h"
+#include "esphome/core/helpers.h"
 #include "esphome/core/log.h"
 
 namespace esphome::daikin_wrc {
 
-static const char *const TAG = "daikin_wrc.climate";
+ESPHOME_LOG_TAG(TAG, "daikin_wrc.climate");
+
+namespace {
+
+// All values in the state frame are four-bit nibbles sent least-significant bit first.
+static constexpr uint8_t TEMP_MIN = 16;
+static constexpr uint8_t TEMP_MAX = 30;
+
+static constexpr uint8_t MODE_AUTO = 0xA;
+static constexpr uint8_t MODE_COOL = 0x2;
+static constexpr uint8_t MODE_HEAT = 0x8;
+static constexpr uint8_t MODE_DRY = 0x1;
+static constexpr uint8_t MODE_FAN = 0x4;
+static constexpr uint8_t MODE_OFF = 0x0;
+
+static constexpr uint8_t FAN_AUTO = 0x1;
+static constexpr uint8_t FAN_SILENT = 0x9;
+static constexpr uint8_t FAN_TURBO = 0x3;
+static constexpr uint8_t FAN_LOW = 0x8;
+static constexpr uint8_t FAN_MEDIUM = 0x4;
+static constexpr uint8_t FAN_HIGH = 0x2;
+
+static constexpr uint8_t FRAME_HEADER_1 = 0x6;
+static constexpr uint8_t FRAME_HEADER_2 = 0x1;
+static constexpr uint8_t MODE_INDEX = 2;
+static constexpr uint8_t FAN_INDEX = 3;
+static constexpr uint8_t TEMPERATURE_UNITS_INDEX = 12;
+static constexpr uint8_t TEMPERATURE_TENS_INDEX = 13;
+static constexpr uint8_t FLAGS_INDEX = 14;
+static constexpr uint8_t CHECKSUM_INDEX = 15;
+
+static constexpr uint8_t FLAG_SWING = 0x1;
+static constexpr uint8_t FLAG_SLEEP = 0x2;
+static constexpr uint8_t FLAG_DEFAULT = 0x4;
+static constexpr uint8_t FLAG_POWER_TOGGLE = 0x8;
+
+static constexpr uint32_t IR_FREQUENCY = 38000;
+static constexpr uint32_t HEADER_MARK = 9800;
+static constexpr uint32_t HEADER_SPACE = 9700;
+static constexpr uint32_t MESSAGE_HEADER_MARK = 4700;
+static constexpr uint32_t MESSAGE_HEADER_SPACE = 2400;
+static constexpr uint32_t BIT_MARK = 400;
+static constexpr uint32_t ONE_SPACE = 800;
+static constexpr uint32_t ZERO_SPACE = 300;
+static constexpr uint32_t MESSAGE_SPACE = 20000;
+static constexpr uint32_t END_SPACE = 100000;
+static constexpr uint32_t SELF_ECHO_GUARD_MS = 500;
+
+uint8_t calculate_checksum(const uint8_t *frame, size_t size) {
+  uint8_t checksum = 0;
+  for (size_t i = 0; i + 1 < size; i++) {
+    checksum += frame[i];
+  }
+  return checksum & 0x0F;
+}
+
+}  // namespace
+
+DaikinWrcClimate::DaikinWrcClimate()
+    : climate_ir::ClimateIR(
+          TEMP_MIN, TEMP_MAX, 1.0f, true, true,
+          {climate::CLIMATE_FAN_QUIET, climate::CLIMATE_FAN_AUTO, climate::CLIMATE_FAN_LOW, climate::CLIMATE_FAN_MEDIUM,
+           climate::CLIMATE_FAN_HIGH},
+          {climate::CLIMATE_SWING_OFF, climate::CLIMATE_SWING_VERTICAL},
+          {climate::CLIMATE_PRESET_NONE, climate::CLIMATE_PRESET_SLEEP, climate::CLIMATE_PRESET_BOOST}) {}
 
 void DaikinWrcClimate::setup() {
-  if (this->state_sensor_ != nullptr) {
-    this->state_sensor_->add_on_state_callback([this](bool state) {
-      if ((state && this->mode == climate::CLIMATE_MODE_OFF) || (!state && this->mode != climate::CLIMATE_MODE_OFF)) {
-        this->mode = state ? (this->previous_mode_ != climate::CLIMATE_MODE_OFF ? this->previous_mode_
-                                                                                : climate::CLIMATE_MODE_AUTO)
-                           : climate::CLIMATE_MODE_OFF;
-        this->previous_mode_ = this->mode;
-        this->publish_state();
-      }
-    });
+  climate_ir::ClimateIR::setup();
+  if (this->mode != climate::CLIMATE_MODE_OFF)
+    this->last_active_mode_ = this->mode;
+
+  if (this->state_sensor_ == nullptr)
+    return;
+
+  this->state_sensor_->add_on_state_callback([this](bool state) { this->set_power_state_(state); });
+  if (this->state_sensor_->has_state())
+    this->set_power_state_(this->state_sensor_->state);
+}
+
+void DaikinWrcClimate::set_power_state_(bool power) {
+  if (power) {
+    if (this->mode == climate::CLIMATE_MODE_OFF) {
+      this->mode = this->last_active_mode_;
+      this->publish_state();
+    }
+    return;
   }
-  ClimateIR::setup();
+
+  if (this->mode != climate::CLIMATE_MODE_OFF) {
+    this->last_active_mode_ = this->mode;
+    this->mode = climate::CLIMATE_MODE_OFF;
+    this->publish_state();
+  }
 }
 
 void DaikinWrcClimate::control(const climate::ClimateCall &call) {
-  this->previous_mode_ = this->mode;
-  ClimateIR::control(call);
+  const climate::ClimateMode requested_mode = call.get_mode().value_or(this->mode);
+  this->power_toggle_ = (this->mode == climate::CLIMATE_MODE_OFF) != (requested_mode == climate::CLIMATE_MODE_OFF);
+  climate_ir::ClimateIR::control(call);
+  if (this->mode != climate::CLIMATE_MODE_OFF)
+    this->last_active_mode_ = this->mode;
+}
+
+void DaikinWrcClimate::build_state_frame_(uint8_t frame[]) const {
+  // In flash: an initialized local array is copied from a RAM constant on ESP8266
+  static constexpr uint8_t FRAME_TEMPLATE[STATE_FRAME_SIZE] PROGMEM = {
+      FRAME_HEADER_1, FRAME_HEADER_2, MODE_COOL, FAN_AUTO, 0x0, 0x0, 0x0, 0x0, 0x2, 0x6, 0x2, 0x4, 0x2, 0x2, 0xC, 0x0,
+  };
+  progmem_memcpy(frame, FRAME_TEMPLATE, STATE_FRAME_SIZE);
+
+  frame[MODE_INDEX] = this->operation_mode_();
+  frame[FAN_INDEX] = this->fan_speed_();
+  const uint8_t temperature = this->temperature_();
+  frame[TEMPERATURE_UNITS_INDEX] = temperature & 0x0F;
+  frame[TEMPERATURE_TENS_INDEX] = temperature >> 4;
+  frame[FLAGS_INDEX] = this->special_flags_(this->power_toggle_);
+  frame[CHECKSUM_INDEX] = calculate_checksum(frame, STATE_FRAME_SIZE);
 }
 
 void DaikinWrcClimate::transmit_state() {
+  // Set this before starting because a receiver can see the frame while it is being sent.
   this->last_sent_time_ = millis();
-  uint8_t remote_state[16] = {DAIKIN_WRC_FRAME_HEADER_1,
-                              DAIKIN_WRC_FRAME_HEADER_2,
-                              0x2,
-                              0x1,
-                              0x0,
-                              0x0,
-                              0x0,
-                              0x0,
-                              0x2,
-                              0x6,
-                              0x2,
-                              0x4,
-                              0x2,
-                              0x2,
-                              0xc,
-                              0x0};
 
-  remote_state[2] = this->operation_mode_();
-  remote_state[3] = this->fan_speed_();
-  uint8_t temperature = this->temperature_();
-  remote_state[12] = temperature & 0x0f;
-  remote_state[13] = temperature >> 4;
-  remote_state[14] = this->special_flags_();
-
-  uint8_t checksum = 0;
-  for (uint8_t i = 0; i < DAIKIN_WRC_STATE_FRAME_SIZE - 1; i++) {
-    checksum += remote_state[i];
-  }
-  remote_state[15] = checksum & 0x0f;
+  uint8_t remote_state[STATE_FRAME_SIZE];
+  this->build_state_frame_(remote_state);
+  this->power_toggle_ = false;
 
   auto transmit = this->transmitter_->transmit();
   auto *data = transmit.get_data();
-  data->set_carrier_frequency(DAIKIN_WRC_IR_FREQUENCY);
+  data->set_carrier_frequency(IR_FREQUENCY);
+  data->reserve(6 + STATE_FRAME_SIZE * 8 + 4);
 
-  data->mark(DAIKIN_WRC_HEADER_MARK);
-  data->space(DAIKIN_WRC_HEADER_SPACE);
-  data->mark(DAIKIN_WRC_HEADER_MARK);
-  data->space(DAIKIN_WRC_HEADER_SPACE);
-  data->mark(DAIKIN_WRC_HDR_MSG_MARK);
-  data->space(DAIKIN_WRC_HDR_MSG_SPACE);
-  for (uint8_t i : remote_state) {
-    for (uint8_t mask = 1; mask <= 8; mask <<= 1) {  // iterate through bit mask
-      data->mark(DAIKIN_WRC_BIT_MARK);
-      bool bit = i & mask;
-      data->space(bit ? DAIKIN_WRC_ONE_SPACE : DAIKIN_WRC_ZERO_SPACE);
+  data->item(HEADER_MARK, HEADER_SPACE);
+  data->item(HEADER_MARK, HEADER_SPACE);
+  data->item(MESSAGE_HEADER_MARK, MESSAGE_HEADER_SPACE);
+  for (const uint8_t nibble : remote_state) {
+    for (uint8_t bit = 0; bit < 4; bit++) {
+      data->item(BIT_MARK, (nibble & (1U << bit)) != 0 ? ONE_SPACE : ZERO_SPACE);
     }
   }
-  data->mark(DAIKIN_WRC_BIT_MARK);
-  data->space(DAIKIN_WRC_MESSAGE_SPACE);
-  data->mark(DAIKIN_WRC_HEADER_MARK);
-  data->space(DAIKIN_WRC_END_SPACE);
+  data->item(BIT_MARK, MESSAGE_SPACE);
+  data->item(HEADER_MARK, END_SPACE);
 
   transmit.perform();
 }
 
 uint8_t DaikinWrcClimate::operation_mode_() const {
-  uint8_t operating_mode = DAIKIN_WRC_MODE_AUTO;
   switch (this->mode) {
     case climate::CLIMATE_MODE_AUTO:
-      operating_mode = DAIKIN_WRC_MODE_AUTO;
-      break;
-    case climate::CLIMATE_MODE_COOL:
-      operating_mode = DAIKIN_WRC_MODE_COOL;
-      break;
-    case climate::CLIMATE_MODE_DRY:
-      operating_mode = DAIKIN_WRC_MODE_DRY;
-      break;
-    case climate::CLIMATE_MODE_HEAT:
-      operating_mode = DAIKIN_WRC_MODE_HEAT;
-      break;
     case climate::CLIMATE_MODE_HEAT_COOL:
-      operating_mode = DAIKIN_WRC_MODE_AUTO;
-      break;
+      return MODE_AUTO;
+    case climate::CLIMATE_MODE_COOL:
+      return MODE_COOL;
+    case climate::CLIMATE_MODE_DRY:
+      return MODE_DRY;
+    case climate::CLIMATE_MODE_HEAT:
+      return MODE_HEAT;
     case climate::CLIMATE_MODE_FAN_ONLY:
-      operating_mode = DAIKIN_WRC_MODE_FAN;
-      break;
+      return MODE_FAN;
     case climate::CLIMATE_MODE_OFF:
     default:
-      operating_mode = DAIKIN_WRC_MODE_OFF;
-      break;
+      return MODE_OFF;
   }
-
-  return operating_mode;
 }
 
 uint8_t DaikinWrcClimate::fan_speed_() const {
-  uint8_t fan_speed = DAIKIN_WRC_FAN_AUTO;
+  if (this->preset == climate::CLIMATE_PRESET_BOOST)
+    return FAN_TURBO;
+
   switch (this->fan_mode.value_or(climate::CLIMATE_FAN_AUTO)) {
     case climate::CLIMATE_FAN_QUIET:
-      fan_speed = DAIKIN_WRC_FAN_SILENT;
-      break;
+      return FAN_SILENT;
     case climate::CLIMATE_FAN_LOW:
-      fan_speed = DAIKIN_WRC_FAN_LOW;
-      break;
+      return FAN_LOW;
     case climate::CLIMATE_FAN_MEDIUM:
-      fan_speed = DAIKIN_WRC_FAN_MEDIUM;
-      break;
+      return FAN_MEDIUM;
     case climate::CLIMATE_FAN_HIGH:
-      fan_speed = DAIKIN_WRC_FAN_HIGH;
-      break;
+      return FAN_HIGH;
     case climate::CLIMATE_FAN_AUTO:
     default:
-      fan_speed = DAIKIN_WRC_FAN_AUTO;
+      return FAN_AUTO;
   }
-
-  if (this->preset == climate::CLIMATE_PRESET_BOOST) {
-    fan_speed = DAIKIN_WRC_FAN_TURBO;
-  }
-
-  return fan_speed;
 }
 
-uint8_t DaikinWrcClimate::special_flags_() const {
-  uint8_t special_flags = 0x4;  // Unknown bit (can also be disabled, but is enabled by default)
-
-  // Power ON/OFF
-  if (this->previous_mode_ != this->mode &&
-      (this->mode == climate::CLIMATE_MODE_OFF || this->previous_mode_ == climate::CLIMATE_MODE_OFF)) {
-    special_flags |= 0x8;
-  }
-
-  if (this->swing_mode == climate::CLIMATE_SWING_VERTICAL) {
-    special_flags |= 0x1;
-  }
-
-  if (this->preset == climate::CLIMATE_PRESET_SLEEP) {
-    special_flags |= 0x2;
-  }
-
-  return special_flags;
+uint8_t DaikinWrcClimate::special_flags_(bool power_toggle) const {
+  uint8_t flags = FLAG_DEFAULT;
+  if (power_toggle)
+    flags |= FLAG_POWER_TOGGLE;
+  if (this->swing_mode == climate::CLIMATE_SWING_VERTICAL)
+    flags |= FLAG_SWING;
+  if (this->preset == climate::CLIMATE_PRESET_SLEEP)
+    flags |= FLAG_SLEEP;
+  return flags;
 }
 
 uint8_t DaikinWrcClimate::temperature_() const {
-  uint8_t temperature =
-      static_cast<uint8_t>(roundf(clamp<float>(this->target_temperature, DAIKIN_WRC_TEMP_MIN, DAIKIN_WRC_TEMP_MAX)));
+  const uint8_t temperature = static_cast<uint8_t>(roundf(clamp<float>(this->target_temperature, TEMP_MIN, TEMP_MAX)));
   return ((temperature / 10) << 4) | (temperature % 10);
+}
+
+bool DaikinWrcClimate::read_state_frame_(remote_base::RemoteReceiveData &data, uint8_t frame[]) const {
+  for (uint8_t pos = 0; pos < STATE_FRAME_SIZE; pos++) {
+    uint8_t nibble = 0;
+    for (uint8_t bit = 0; bit < 4; bit++) {
+      if (data.expect_item(BIT_MARK, ONE_SPACE)) {
+        nibble |= 1U << bit;
+      } else if (!data.expect_item(BIT_MARK, ZERO_SPACE)) {
+        return false;
+      }
+    }
+    frame[pos] = nibble;
+    if ((pos == 0 && nibble != FRAME_HEADER_1) || (pos == 1 && nibble != FRAME_HEADER_2))
+      return false;
+  }
+  return true;
 }
 
 bool DaikinWrcClimate::parse_state_frame_(const uint8_t frame[]) {
@@ -174,123 +231,111 @@ bool DaikinWrcClimate::parse_state_frame_(const uint8_t frame[]) {
             "Received state frame: %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x",
             frame[0], frame[1], frame[2], frame[3], frame[4], frame[5], frame[6], frame[7], frame[8], frame[9],
             frame[10], frame[11], frame[12], frame[13], frame[14], frame[15]);
-  uint8_t checksum = 0;
-  for (uint8_t i = 0; i < (DAIKIN_WRC_STATE_FRAME_SIZE - 1); i++) {
-    checksum += frame[i];
-  }
-  checksum &= 0x0f;
-  if (frame[DAIKIN_WRC_STATE_FRAME_SIZE - 1] != checksum) {
-    ESP_LOGV(TAG, "Checksum doesn't match: expected 0x%02x, got 0x%02x", checksum,
-             frame[DAIKIN_WRC_STATE_FRAME_SIZE - 1]);
+
+  const uint8_t checksum = calculate_checksum(frame, STATE_FRAME_SIZE);
+  if (frame[CHECKSUM_INDEX] != checksum) {
+    ESP_LOGV(TAG, "Invalid checksum: expected 0x%x, got 0x%x", checksum, frame[CHECKSUM_INDEX]);
     return false;
   }
-  uint8_t mode = frame[2];
-  bool power = frame[14] & 0x8;
-  uint8_t temperature = clamp<uint8_t>((frame[13] * 10) + frame[12], DAIKIN_WRC_TEMP_MIN, DAIKIN_WRC_TEMP_MAX);
-  if (((this->mode == climate::CLIMATE_MODE_OFF && power) || (this->mode != climate::CLIMATE_MODE_OFF && !power))) {
-    switch (mode) {
-      case DAIKIN_WRC_MODE_COOL:
-        this->mode = climate::CLIMATE_MODE_COOL;
-        this->target_temperature = static_cast<float>(temperature);
+
+  // Bit 3 toggles power; it is not an absolute power state. Decode everything before changing the entity so a
+  // malformed frame cannot leave a partially updated state behind.
+  const bool power_toggle = (frame[FLAGS_INDEX] & FLAG_POWER_TOGGLE) != 0;
+  const bool powered_on = (this->mode != climate::CLIMATE_MODE_OFF) != power_toggle;
+  climate::ClimateMode new_mode = climate::CLIMATE_MODE_OFF;
+  float new_temperature = this->target_temperature;
+
+  if (powered_on) {
+    switch (frame[MODE_INDEX]) {
+      case MODE_COOL:
+        new_mode = climate::CLIMATE_MODE_COOL;
         break;
-      case DAIKIN_WRC_MODE_DRY:
-        this->mode = climate::CLIMATE_MODE_DRY;
+      case MODE_DRY:
+        new_mode = climate::CLIMATE_MODE_DRY;
         break;
-      case DAIKIN_WRC_MODE_HEAT:
-        this->mode = climate::CLIMATE_MODE_HEAT;
-        this->target_temperature = static_cast<float>(temperature);
+      case MODE_HEAT:
+        new_mode = climate::CLIMATE_MODE_HEAT;
         break;
-      case DAIKIN_WRC_MODE_AUTO:
-        this->mode = climate::CLIMATE_MODE_HEAT_COOL;
-        this->target_temperature = static_cast<float>(temperature);
+      case MODE_AUTO:
+        new_mode = climate::CLIMATE_MODE_HEAT_COOL;
         break;
-      case DAIKIN_WRC_MODE_FAN:
-        this->mode = climate::CLIMATE_MODE_FAN_ONLY;
+      case MODE_FAN:
+        new_mode = climate::CLIMATE_MODE_FAN_ONLY;
         break;
+      default:
+        ESP_LOGV(TAG, "Invalid operation mode: 0x%x", frame[MODE_INDEX]);
+        return false;
     }
-  } else {
-    this->mode = climate::CLIMATE_MODE_OFF;
+
+    if (new_mode == climate::CLIMATE_MODE_COOL || new_mode == climate::CLIMATE_MODE_HEAT ||
+        new_mode == climate::CLIMATE_MODE_HEAT_COOL) {
+      const uint8_t temperature = frame[TEMPERATURE_TENS_INDEX] * 10 + frame[TEMPERATURE_UNITS_INDEX];
+      if (temperature < TEMP_MIN || temperature > TEMP_MAX || frame[TEMPERATURE_UNITS_INDEX] > 9) {
+        ESP_LOGV(TAG, "Invalid temperature: %u", temperature);
+        return false;
+      }
+      new_temperature = static_cast<float>(temperature);
+    }
   }
 
-  this->preset = climate::CLIMATE_PRESET_NONE;
-
-  uint8_t fan_mode = frame[3];
-  bool swing_mode = frame[14] & 0x1;
-  if (swing_mode) {
-    this->swing_mode = climate::CLIMATE_SWING_VERTICAL;
-  } else {
-    this->swing_mode = climate::CLIMATE_SWING_OFF;
-  }
-  switch (fan_mode) {
-    case DAIKIN_WRC_FAN_LOW:
-      this->fan_mode = climate::CLIMATE_FAN_LOW;
+  climate::ClimateFanMode new_fan_mode;
+  switch (frame[FAN_INDEX]) {
+    case FAN_LOW:
+      new_fan_mode = climate::CLIMATE_FAN_LOW;
       break;
-    case DAIKIN_WRC_FAN_MEDIUM:
-      this->fan_mode = climate::CLIMATE_FAN_MEDIUM;
+    case FAN_MEDIUM:
+      new_fan_mode = climate::CLIMATE_FAN_MEDIUM;
       break;
-    case DAIKIN_WRC_FAN_HIGH:
-      this->fan_mode = climate::CLIMATE_FAN_HIGH;
+    case FAN_HIGH:
+      new_fan_mode = climate::CLIMATE_FAN_HIGH;
       break;
-    case DAIKIN_WRC_FAN_AUTO:
-      this->fan_mode = climate::CLIMATE_FAN_AUTO;
+    case FAN_AUTO:
+    case FAN_TURBO:
+      new_fan_mode = climate::CLIMATE_FAN_AUTO;
       break;
-    case DAIKIN_WRC_FAN_SILENT:
-      this->fan_mode = climate::CLIMATE_FAN_QUIET;
-      break;
-    case DAIKIN_WRC_FAN_TURBO:
-      this->fan_mode = climate::CLIMATE_FAN_AUTO;
-      this->preset = climate::CLIMATE_PRESET_BOOST;
+    case FAN_SILENT:
+      new_fan_mode = climate::CLIMATE_FAN_QUIET;
       break;
     default:
-      this->fan_mode = climate::CLIMATE_FAN_AUTO;
+      ESP_LOGV(TAG, "Invalid fan mode: 0x%x", frame[FAN_INDEX]);
+      return false;
   }
 
-  bool sleep_mode = frame[14] & 0x2;
-  if (sleep_mode) {
-    this->preset = climate::CLIMATE_PRESET_SLEEP;
-  }
+  climate::ClimatePreset new_preset = climate::CLIMATE_PRESET_NONE;
+  if (frame[FAN_INDEX] == FAN_TURBO)
+    new_preset = climate::CLIMATE_PRESET_BOOST;
+  if ((frame[FLAGS_INDEX] & FLAG_SLEEP) != 0)
+    new_preset = climate::CLIMATE_PRESET_SLEEP;
 
+  this->mode = new_mode;
+  this->target_temperature = new_temperature;
+  this->fan_mode = new_fan_mode;
+  this->swing_mode =
+      (frame[FLAGS_INDEX] & FLAG_SWING) != 0 ? climate::CLIMATE_SWING_VERTICAL : climate::CLIMATE_SWING_OFF;
+  this->preset = new_preset;
+  if (new_mode != climate::CLIMATE_MODE_OFF)
+    this->last_active_mode_ = new_mode;
   this->publish_state();
   return true;
 }
 
 bool DaikinWrcClimate::on_receive(remote_base::RemoteReceiveData data) {
-  if (this->last_sent_time_ != 0 && millis() - this->last_sent_time_ < DAIKIN_WRC_SELF_ECHO_GUARD)
-    return false;  // To ignore self sent command
+  if (this->last_sent_time_ != UINT32_MAX && millis() - this->last_sent_time_ < SELF_ECHO_GUARD_MS)
+    return false;
 
-  // The IR receiver module may distort the first symbols of a burst after being idle,
-  // and some third party remotes send the message header without the two preamble
-  // headers. Scan for the message header anywhere in the burst and retry at every
-  // occurrence, so a single distorted symbol doesn't drop the whole command.
-  for (uint32_t offset = 0; offset + 2 < data.size(); offset++) {
-    if (!data.peek_item(DAIKIN_WRC_HDR_MSG_MARK, DAIKIN_WRC_HDR_MSG_SPACE, offset))
-      continue;
+  // A receiver can distort the first symbols after being idle, and some third-party remotes omit the two preamble
+  // headers. Try every message header in the capture rather than dropping the whole command after one bad symbol.
+  for (int32_t offset = 0; offset + 1 < data.size(); offset++) {
     data.reset();
-    data.advance(offset + 2);  // skip the message header item
-    uint8_t state_frame[DAIKIN_WRC_STATE_FRAME_SIZE] = {};
+    if (!data.peek_item(MESSAGE_HEADER_MARK, MESSAGE_HEADER_SPACE, offset))
+      continue;
+
+    data.advance(offset + 2);
+    uint8_t state_frame[STATE_FRAME_SIZE];
     if (this->read_state_frame_(data, state_frame) && this->parse_state_frame_(state_frame))
       return true;
   }
   return false;
-}
-
-bool DaikinWrcClimate::read_state_frame_(remote_base::RemoteReceiveData &data, uint8_t frame[]) {
-  for (uint8_t pos = 0; pos < DAIKIN_WRC_STATE_FRAME_SIZE; pos++) {
-    uint8_t byte = 0;
-    for (int8_t bit = 0; bit < 4; bit++) {
-      if (data.expect_item(DAIKIN_WRC_BIT_MARK, DAIKIN_WRC_ONE_SPACE)) {
-        byte |= 1 << bit;
-      } else if (!data.expect_item(DAIKIN_WRC_BIT_MARK, DAIKIN_WRC_ZERO_SPACE)) {
-        return false;
-      }
-    }
-    frame[pos] = byte;
-    if (pos == 0 && byte != DAIKIN_WRC_FRAME_HEADER_1)
-      return false;
-    if (pos == 1 && byte != DAIKIN_WRC_FRAME_HEADER_2)
-      return false;
-  }
-  return true;
 }
 
 }  // namespace esphome::daikin_wrc
